@@ -19,7 +19,22 @@ data/
 3. Place the file under `/data/adni/diagnosis/`
 
 
-## 1. Image (MRI) Preprocessing
+## 1-1. Image (MRI) Preprocessed Version - Recommended
+
+### Data Folder 
+```
+data/
+├── adni
+    └── image
+        └── UCSFFSX7_09Jun2025.csv
+```
+
+### Steps
+1. Search & Download -> Study Collections -> Study Files -> Imaging
+2. Download "UCSF - Cross-Sectional FreeSurfer (7.x) [ADNI1,GO,2,3,4]"
+3. Move to `/data/adni/image/`
+
+## 1-2. Image (MRI) Preprocessing
 
 ### Data Folder 
 ```
@@ -31,7 +46,12 @@ data/
         └── ...
 ```
 
-### Steps
+### Steps (Updated!)
+1. Search & Download -> Image Collections -> Other Shared Collections -> Download `ADNI1:Complete 1Yr 1.5T` (You may choose other variants such as different years or 3T, but note that the cohort size will be smaller.)
+
+2. For preprocessing, please refer to the files under the data/adni/image folder, and the MUSE repository (https://github.com/CBICA/MUSE).
+
+### Steps (Outdated)
 1. Search & Download -> Image Collections, Search without Subject ID and save files as `{Subject ID}_{Scan date}` format.
 2. Build CBICApipeline container using file: [image/CBICApipeline_centos7.def](image/CBICApipeline_centos7.def)
 3. Define singularity wrapper file: [image/singularity_wrapper.sh](image/singularity_wrapper.sh)

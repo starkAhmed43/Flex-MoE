@@ -6,6 +6,10 @@ Official implementation for "Flex-MoE: Modeling Arbitrary Modality Combination v
 
 - Authors: [Sukwon Yun](https://sukwonyun.github.io/), [Inyoung Choi](https://www.linkedin.com/in/inyoung-choi-77105221b/), [Jie Peng](https://openreview.net/profile?id=~Jie_Peng4), Yangfan Wu, [Jingxuan Bao](https://jingxuanbao.github.io/), [Qiyiwen Zhang](https://www.linkedin.com/in/qiyiwen-zhang-438354133), [Jiayi Xin](https://www.linkedin.com/in/jiayi-xin/), [Qi Long](https://www.med.upenn.edu/long-lab/currentgroupmembers.html) and [Tianlong Chen](https://tianlong-chen.github.io/)
 
+**Update (June 9, 2025)**:
+* 🚀 We've received several requests for easier and more user-friendly support of the image modality. The dataloader has been updated to support the preprocessed image version. Details here: [data/adni/README.md](data/adni/README.md)
+
+
 ## Overview
 
 Multimodal learning has gained increasing importance across various fields, offering the ability to integrate data from diverse sources such as images, text, and personalized records, which are frequently observed in medical domains. However, in scenarios where some modalities are missing, many existing frameworks struggle to accommodate arbitrary modality combinations, often relying heavily on a single modality or complete data. This oversight of potential modality combinations limits their applicability in real-world situations. To address this challenge, we propose Flex-MoE (Flexible Mixture-of-Experts), a new framework designed to flexibly incorporate arbitrary modality combinations while maintaining robustness to missing data. The core idea of Flex-MoE is to first address missing modalities using a new missing modality bank that integrates observed modality combinations with the corresponding missing ones. This is followed by a uniquely designed Sparse MoE framework. Specifically, Flex-MoE first trains experts using samples with all modalities to inject generalized knowledge through the generalized router ($\mathcal{G}$-Router). The $\mathcal{S}$-Router then specializes in handling fewer modality combinations by assigning the top-1 gate to the expert corresponding to the observed modality combination. We evaluate Flex-MoE on the ADNI dataset, which encompasses four modalities in the Alzheimer's Disease domain, as well as on the MIMIC-IV dataset. The results demonstrate the effectiveness of Flex-MoE highlighting its ability to model arbitrary modality combinations in diverse missing modality scenarios.
@@ -36,7 +40,8 @@ conda install -c conda-forge scanpy nibabel -y
 1. To access ADNI dataset, please first visit ADNI website: https://adni.loni.usc.edu/ and apply for the data access here: https://ida.loni.usc.edu/collaboration/access/appApply.jsp?project=ADNI.
 2. Once you get an access, login to IDA and dowlonad necessary files for each modality.
     - Image:
-        - {Subject ID}_{Scan date}
+        - UCSF - Cross-Sectional FreeSurfer (7.x) (Preprocessed Version - Updated!)
+        - {Subject ID}_{Scan date} (Original Version)
     - Genomic:
         - ADNI 1 SNP genotype data - PLINK
         - ADNI GO/2 SNP genotype data - Complete PLINK for sets 1 - 9

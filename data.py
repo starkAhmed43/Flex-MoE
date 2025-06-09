@@ -8,11 +8,11 @@ from models import Custom3DCNN, PatchEmbeddings
 from torchvision.transforms import Compose, ToTensor, Normalize
 import os
 import nibabel as nib
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from itertools import combinations
 
 class MultiModalDataset(Dataset):
-    def __init__(self, data_dict, observed_idx, ids, labels, input_dims, transforms, masks, use_common_ids=True):
+    def __init__(self, data_dict, observed_idx, ids, labels, input_dims, transforms, masks, preprocessed=False, use_common_ids=True):
         self.data_dict = data_dict
         self.mc = np.array(data_dict['modality_comb'])
         self.observed = observed_idx
@@ -21,6 +21,7 @@ class MultiModalDataset(Dataset):
         self.input_dims = input_dims
         self.transforms = transforms
         self.masks = masks
+        self.preprocessed = preprocessed
         self.use_common_ids = use_common_ids
         self.data_new = {modality: data[ids] for modality, data in self.data_dict.items() if 'modality' not in modality}
         self.label_new = self.labels[ids]
@@ -41,7 +42,7 @@ class MultiModalDataset(Dataset):
         sample_data = {}
         for modality, data in self.data_new.items():
             sample_data[modality] = data[idx]
-            if modality == 'image':
+            if (modality == 'image') & (not self.preprocessed):
                 subj1 = data[idx]
                 subj_gm_3d = np.zeros(self.masks.shape, dtype=np.float32)
                 subj_gm_3d.ravel()[self.masks] = subj1
@@ -113,6 +114,7 @@ def load_and_preprocess_image_data(image_path, label_df, id_to_idx):
 def load_and_preprocess_data(args, modality_dict):
     # Paths
     image_path = './data/adni/image'
+    preprocessed_image_path = './data/adni/image/UCSFFSX7_09Jun2025.csv'
     genomic_path = './data/adni/genomic/genomic_merged.h5ad'
     clinical_path = './data/adni/clinical/clinical_merged'
     biospecimen_path = './data/adni/biospecimen/biospecimen_merged'
@@ -150,23 +152,58 @@ def load_and_preprocess_data(args, modality_dict):
 
     # Load modalities
     if 'I' in args.modality or 'i' in args.modality:
-        arr, filtered_idx, mean, std, mask = load_and_preprocess_image_data(image_path, label_df, id_to_idx)
-        observed_idx_arr[:, modality_dict['image']] = arr[:, 0] != -2
-        for idx in filtered_idx:
-            update_modality_combinations(idx, 'I')
+        if args.preprocessed:
+            df = pd.read_csv(preprocessed_image_path)
+        
+            # filter the latest record per subject using update_stamp
+            df['update_stamp'] = pd.to_datetime(df['update_stamp'], errors='coerce')
+            idx = df.groupby('PTID')['update_stamp'].idxmax()
+            df = df.loc[idx].reset_index(drop=True)
+            df.index = df['PTID']
 
-        data_dict['image'] = np.array(arr)
-        common_idx_list.append(set(filtered_idx))
-        encoder_dict['image'] = torch.nn.Sequential(
-            Custom3DCNN(hidden_dim=args.hidden_dim).to(args.device),
-            PatchEmbeddings(feature_size=args.hidden_dim, num_patches=args.num_patches, embed_dim=args.hidden_dim).to(args.device)
-            )
-        input_dims['image'] = arr.shape[1]
-        transforms['image'] = Compose([
-                                    ToTensor(),
-                                    Normalize(mean=[mean], std=[std]),
-                                ])
-        masks['image'] = mask
+            # select brain-related features ending with CV, TA, or SV.
+            feature_cols = [col for col in df.columns if (
+                col.endswith('CV') or col.endswith('TA') or col.endswith('SV')) and col.startswith('ST')
+            ]
+            df = df[feature_cols]
+
+            if args.initial_filling == 'mean':
+                df = df.apply(lambda x: x.fillna(x.mode().iloc[0]), axis=0)
+
+            scaler = StandardScaler()
+            brain_values = df.apply(pd.to_numeric, errors='coerce')  
+            arr = scaler.fit_transform(brain_values.fillna(0)) 
+            
+            new_idx = np.array(convert_ids_to_index(df.index, id_to_idx))
+            filtered_idx = new_idx[new_idx != -1]
+            for idx in filtered_idx:
+                update_modality_combinations(idx, 'I')
+            tmp = np.zeros((len(id_to_idx), arr.shape[1])) - 2
+            tmp[filtered_idx] = arr[new_idx != -1]
+            observed_idx_arr[filtered_idx, modality_dict['image']] = True
+            data_dict['image'] = tmp.astype(np.float32)
+            common_idx_list.append(set(filtered_idx))
+            encoder_dict['image'] = PatchEmbeddings(df.shape[1], args.num_patches, args.hidden_dim).to(args.device)
+            input_dims['image'] = df.shape[1]
+
+        else:
+            arr, filtered_idx, mean, std, mask = load_and_preprocess_image_data(image_path, label_df, id_to_idx)
+            observed_idx_arr[:, modality_dict['image']] = arr[:, 0] != -2
+            for idx in filtered_idx:
+                update_modality_combinations(idx, 'I')
+
+            data_dict['image'] = np.array(arr)
+            common_idx_list.append(set(filtered_idx))
+            encoder_dict['image'] = torch.nn.Sequential(
+                Custom3DCNN(hidden_dim=args.hidden_dim).to(args.device),
+                PatchEmbeddings(feature_size=args.hidden_dim, num_patches=args.num_patches, embed_dim=args.hidden_dim).to(args.device)
+                )
+            input_dims['image'] = arr.shape[1]
+            transforms['image'] = Compose([
+                                        ToTensor(),
+                                        Normalize(mean=[mean], std=[std]),
+                                    ])
+            masks['image'] = mask
 
     if 'G' in args.modality or 'g' in args.modality:
         df = sc.read_h5ad(genomic_path).to_df()
@@ -375,8 +412,8 @@ def collate_fn(batch):
     observeds = torch.tensor(np.vstack(observeds))
     return collated_data, labels, mcs, observeds
 
-def create_loaders(data_dict, observed_idx, labels, train_ids, valid_ids, test_ids, batch_size, num_workers, pin_memory, input_dims, transforms, masks, use_common_ids=True):
-    if 'image' in list(data_dict.keys()):
+def create_loaders(data_dict, observed_idx, labels, train_ids, valid_ids, test_ids, batch_size, num_workers, pin_memory, input_dims, transforms, masks, preprocessed, use_common_ids=True):
+    if ('image' in list(data_dict.keys())) & (not preprocessed):
         train_transfrom = val_transform = test_transform = transforms['image']
         # val_transform = test_transform = False
         mask = masks['image']
@@ -384,9 +421,9 @@ def create_loaders(data_dict, observed_idx, labels, train_ids, valid_ids, test_i
         train_transfrom = val_transform = test_transform = False
         mask = None
 
-    train_dataset = MultiModalDataset(data_dict, observed_idx, train_ids, labels, input_dims, train_transfrom, mask, use_common_ids)
-    valid_dataset = MultiModalDataset(data_dict, observed_idx, valid_ids, labels, input_dims, val_transform, mask, use_common_ids)
-    test_dataset = MultiModalDataset(data_dict, observed_idx, test_ids, labels, input_dims, test_transform, mask, use_common_ids)
+    train_dataset = MultiModalDataset(data_dict, observed_idx, train_ids, labels, input_dims, train_transfrom, mask, preprocessed, use_common_ids)
+    valid_dataset = MultiModalDataset(data_dict, observed_idx, valid_ids, labels, input_dims, val_transform, mask, preprocessed, use_common_ids)
+    test_dataset = MultiModalDataset(data_dict, observed_idx, test_ids, labels, input_dims, test_transform, mask, preprocessed, use_common_ids)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, num_workers=num_workers, pin_memory=pin_memory)
     train_loader_shuffle = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=pin_memory)

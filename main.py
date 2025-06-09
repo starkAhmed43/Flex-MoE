@@ -25,6 +25,7 @@ def parse_args():
     parser.add_argument('--device', type=int, default=0)
     parser.add_argument('--data', type=str, default='adni')
     parser.add_argument('--modality', type=str, default='IGCB') # I G C B for ADNI, L N C for MIMIC
+    parser.add_argument('--preprocessed', type=str2bool, default=True) # Whether to use preprocessed image modality
     parser.add_argument('--initial_filling', type=str, default='mean') # None mean
     parser.add_argument('--train_epochs', type=int, default=50)
     parser.add_argument('--warm_up_epochs', type=int, default=5)
@@ -116,7 +117,7 @@ def train_and_evaluate(args, seed, save_path=None):
         args.n_full_modalities = len(modality_dict)
         data_dict, encoder_dict, labels, train_ids, valid_ids, test_ids, n_labels, input_dims, transforms, masks, observed_idx_arr, full_modality_index = load_and_preprocess_data(args, modality_dict)
         
-    train_loader, train_loader_shuffle, val_loader, test_loader = create_loaders(data_dict, observed_idx_arr, labels, train_ids, valid_ids, test_ids, args.batch_size, args.num_workers, args.pin_memory, input_dims, transforms, masks, args.use_common_ids)
+    train_loader, train_loader_shuffle, val_loader, test_loader = create_loaders(data_dict, observed_idx_arr, labels, train_ids, valid_ids, test_ids, args.batch_size, args.num_workers, args.pin_memory, input_dims, transforms, masks, args.preprocessed, args.use_common_ids)
     fusion_model = FlexMoE(num_modalities, full_modality_index, args.num_patches, args.hidden_dim, n_labels, args.num_layers_fus, args.num_layers_pred, args.num_experts, args.num_routers, args.top_k, args.num_heads, args.dropout).to(device)
     params = list(fusion_model.parameters()) + [param for encoder in encoder_dict.values() for param in encoder.parameters()]    
     if num_modalities > 1:
