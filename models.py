@@ -6,11 +6,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Import the custom MoE modules from the other file.
-from moe_module import *
+import torchmetrics
+import pytorch_lightning as pl
+from moe_module import FMoETransformerMLP
 
-
-class FlexMoE(nn.Module):
+class FlexMoE(pl.LightningModule):
     """
     The main model class that orchestrates the entire Flex-MoE architecture.
 
@@ -40,6 +40,8 @@ class FlexMoE(nn.Module):
             dropout (float, optional): The dropout rate. Defaults to 0.5.
         """
         super(FlexMoE, self).__init__()
+        self.save_hyperparameters()
+        
         layers = []
         _sparse = True # Start with a sparse (MoE) layer.
 
@@ -65,6 +67,23 @@ class FlexMoE(nn.Module):
         self.patch_embedders = nn.ModuleList([
             PatchEmbeddings(feature_size, num_patches, hidden_dim) for feature_size in input_dims
         ])
+        
+        # Define metrics for training, validation
+        self.train_r2 = torchmetrics.R2Score()
+        self.val_r2 = torchmetrics.R2Score()
+        self.test_r2 = torchmetrics.R2Score()
+
+        self.train_pearson = torchmetrics.PearsonCorrCoef()
+        self.val_pearson = torchmetrics.PearsonCorrCoef()
+        self.test_pearson = torchmetrics.PearsonCorrCoef()
+
+        self.train_mae = torchmetrics.MeanAbsoluteError()
+        self.val_mae = torchmetrics.MeanAbsoluteError()
+        self.test_mae = torchmetrics.MeanAbsoluteError()
+
+        self.train_mse = torchmetrics.MeanSquaredError()
+        self.val_mse = torchmetrics.MeanSquaredError()
+        self.test_mse = torchmetrics.MeanSquaredError()
 
     def forward(self, *inputs, expert_indices=None, is_full_modality=None):
         """
@@ -198,6 +217,102 @@ class FlexMoE(nn.Module):
                         gate.get_topk_logit(clear=True)
                     if hasattr(gate, 'get_topk_indicate'):
                         gate.get_topk_indicate(clear=True)
+
+    def training_step(self, batch, batch_idx):
+        # Unpack batch (assuming your DataModule returns the same structure as your collate_fn)
+        batch_samples, batch_labels, batch_mcs, batch_observed = batch
+        inputs = [batch_samples[mod] for mod in batch_samples]
+        outputs = self(*inputs)
+        preds, targets = outputs.squeeze(), batch_labels.float()
+        loss = F.mse_loss(preds, targets)
+
+        self.train_r2.update(preds, targets)
+        self.train_pearson.update(preds, targets)
+        self.train_mae.update(preds, targets)
+        self.train_mse.update(preds, targets)
+        self.log("train/r2", self.train_r2, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train/pearson", self.train_pearson, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train/mae", self.train_mae, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train/mse", self.train_mse, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("train/gate_loss", self.gate_loss(), on_step=True, on_epoch=True, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        batch_samples, batch_labels, batch_mcs, batch_observed = batch
+        inputs = [batch_samples[mod] for mod in batch_samples]
+        outputs = self(*inputs)
+        preds, targets = outputs.squeeze(), batch_labels.float()
+        loss = F.mse_loss(preds, targets)
+
+        self.val_r2.update(preds, targets)
+        self.val_pearson.update(preds, targets)
+        self.val_mae.update(preds, targets)
+        self.val_mse.update(preds, targets)
+        self.log("val/r2", self.val_r2, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/pearson", self.val_pearson, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/mae", self.val_mae, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/mse", self.val_mse, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val/gate_loss", self.gate_loss(), on_step=True, on_epoch=True, prog_bar=True)
+        return loss
+    
+    def test_step(self, batch, batch_idx):
+        batch_samples, batch_labels, batch_mcs, batch_observed = batch
+        inputs = [batch_samples[mod] for mod in batch_samples]
+        outputs = self(*inputs)
+        preds, targets = outputs.squeeze(), batch_labels.float()
+        loss = F.mse_loss(preds, targets)
+
+        self.test_r2.update(preds, targets)
+        self.test_pearson.update(preds, targets)
+        self.test_mae.update(preds, targets)
+        self.test_mse.update(preds, targets)
+        self.log("test/r2", self.test_r2, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/pearson", self.test_pearson, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/mae", self.test_mae, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/mse", self.test_mse, on_step=False, on_epoch=True, prog_bar=True)
+        self.log("test/gate_loss", self.gate_loss(), on_step=True, on_epoch=True, prog_bar=True)
+        return loss
+    
+    def on_train_start(self):
+        """
+        Called at the start of training. Resets training metrics.
+        """
+        self.train_r2.reset()
+        self.train_pearson.reset()
+        self.train_mae.reset()
+        self.train_mse.reset()
+
+    def on_validation_start(self):
+        """
+        Called at the start of validation. Resets validation metrics.
+        """
+        self.val_r2.reset()
+        self.val_pearson.reset()
+        self.val_mae.reset()
+        self.val_mse.reset()
+
+    def on_test_start(self):
+        """
+        Called at the start of testing. Resets test metrics.
+        """
+        self.test_r2.reset()
+        self.test_pearson.reset()
+        self.test_mae.reset()
+        self.test_mse.reset()
+
+    def on_train_epoch_end(self):
+        self.clear_gate_buffers()
+
+    def on_validation_epoch_end(self):
+        self.clear_gate_buffers()
+
+    def on_test_epoch_end(self):
+        self.clear_gate_buffers()
+
+    def configure_optimizers(self):
+        # You can customize optimizer and scheduler as needed
+        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+        return optimizer    
 
 class MLP(nn.Module):
     """
