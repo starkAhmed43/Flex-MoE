@@ -1,8 +1,10 @@
+import math
 import numpy as np
 from itertools import combinations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # Import the custom MoE modules from the other file.
 from moe_module import *
@@ -18,7 +20,7 @@ class FlexMoE(nn.Module):
     information to the underlying MoE layers. It also provides a method to collect
     the crucial auxiliary gate loss required for stable MoE training.
     """
-    def __init__(self, num_modalities, full_modality_index, num_patches, hidden_dim, output_dim, num_layers, num_layers_pred, num_experts, num_routers, top_k, num_heads=2, dropout=0.5):
+    def __init__(self, num_modalities, full_modality_index, num_patches, input_dims, hidden_dim, output_dim, num_layers, num_layers_pred, num_experts, num_routers, top_k, num_heads=2, dropout=0.5):
         """
         Initializes the FlexMoE model.
 
@@ -26,6 +28,7 @@ class FlexMoE(nn.Module):
             num_modalities (int): The total number of modalities in the dataset.
             full_modality_index (int): The expert index reserved for the G-Router (when all modalities are present).
             num_patches (int): The number of patches or tokens for each modality's input.
+            input_dims (list): A list of input dimensions for each modality.
             hidden_dim (int): The main hidden dimension used throughout the Transformer layers.
             output_dim (int): The final output dimension for the prediction head.
             num_layers (int): The number of Transformer encoder layers.
@@ -58,6 +61,11 @@ class FlexMoE(nn.Module):
         # Create the mapping from each possible modality combination to a unique expert index.
         self.combination_to_index = self._create_combination_index(num_modalities)
 
+        # Create patch embedding layers for each modality.
+        self.patch_embedders = nn.ModuleList([
+            PatchEmbeddings(feature_size, num_patches, hidden_dim) for feature_size in input_dims
+        ])
+
     def forward(self, *inputs, expert_indices=None, is_full_modality=None):
         """
         Defines the forward pass of the model.
@@ -70,6 +78,10 @@ class FlexMoE(nn.Module):
         Returns:
             torch.Tensor: The final prediction logits.
         """
+        # Apply patch embedding to each modality
+        inputs = [patch_embed(inp) for patch_embed, inp in zip(self.patch_embedders, inputs)]
+        # Now inputs are [batch, num_patches, hidden_dim] for each modality
+
         # Get the number of tokens for each modality to split them back later.
         chunk_size = [input.shape[1] for input in inputs]
         # Concatenate all modality inputs along the token dimension.
@@ -82,12 +94,11 @@ class FlexMoE(nn.Module):
         # Split the concatenated tensor back into a list of tensors, one for each modality.
         x = torch.split(x, chunk_size, dim=1)
 
-        # Pass the data through the Transformer encoder layers.
-        for i in range(len(self.network) - 1):
-            # If expert indices are provided, set them in the current layer.
-            if expert_indices is not None and hasattr(self.network[i], 'set_expert_index'):
-                self.network[i].set_expert_index(expert_indices)
-            x = self.network[i](x)
+        # Pass through all TransformerEncoderLayer modules (except the last, which is MLP)
+        for i, layer in enumerate(self.network[:-1]):
+            if expert_indices is not None and hasattr(layer, 'set_expert_index'):
+                layer.set_expert_index(expert_indices)
+            x = layer(x)
         
         # After the Transformer layers, perform mean pooling over the token dimension for each modality.
         x = [item.mean(dim=1) for item in x]
@@ -171,6 +182,22 @@ class FlexMoE(nn.Module):
         for layer in self.network:
             if hasattr(layer, 'set_full_modality'):
                 layer.set_full_modality(is_full_modality)
+    
+    def clear_gate_buffers(self):
+        """
+        Clears all accumulated gate losses and topk buffers in all MoE gates.
+        Call this after each epoch to prevent memory leaks.
+        """
+        for mn, mm in self.named_modules():
+            if hasattr(mm, 'all_gates'):
+                for i in range(len(mm.all_gates)):
+                    gate = mm.all_gates[f'{i}']
+                    if hasattr(gate, 'clear_loss'):
+                        gate.clear_loss()
+                    if hasattr(gate, 'get_topk_logit'):
+                        gate.get_topk_logit(clear=True)
+                    if hasattr(gate, 'get_topk_indicate'):
+                        gate.get_topk_indicate(clear=True)
 
 class MLP(nn.Module):
     """
@@ -214,6 +241,66 @@ class MLP(nn.Module):
         """The forward pass for the MLP."""
         return self.network(x)
 
+class PatchEmbeddings(nn.Module):
+    """
+    Adapts a 1D feature vector into a sequence of patches for a Transformer.
+
+    This module takes a single, flat feature vector (e.g., a pre-computed embedding)
+    and converts it into a sequence of smaller vectors, or "patches." This is a
+    necessary preprocessing step to use a Transformer architecture, which expects
+    a sequence as input. The naming is inspired by the Vision Transformer (ViT),
+    which performs a similar operation on 2D image patches.
+
+    Args:
+        feature_size (int): The dimensionality of the input feature vector.
+        num_patches (int): The desired number of patches to create in the output sequence.
+        embed_dim (int): The target dimensionality for each output patch (the Transformer's hidden size).
+    """
+    def __init__(self, feature_size, num_patches, embed_dim):
+        super().__init__()
+        # Calculate the size of each patch. We use ceiling division to ensure
+        # the entire feature vector is covered.
+        patch_size = math.ceil(feature_size / num_patches)
+        
+        # Calculate the amount of padding needed to make the feature_size
+        # perfectly divisible by the patch_size.
+        pad_size = num_patches * patch_size - feature_size
+        
+        self.pad_size = pad_size
+        self.num_patches = num_patches
+        self.feature_size = feature_size
+        self.patch_size = patch_size
+        
+        # A linear layer to project each patch from its calculated size
+        # to the desired embedding dimension for the Transformer.
+        self.projection = nn.Linear(patch_size, embed_dim)
+
+    def forward(self, x):
+        """
+        Defines the forward pass for creating the patch sequence.
+
+        Args:
+            x (Tensor): The input tensor of shape (batch_size, feature_size).
+
+        Returns:
+            Tensor: The output tensor of shape (batch_size, num_patches, embed_dim).
+        """
+        # 1. Pad the input tensor on the last dimension to make it evenly divisible.
+        #    Input shape: (batch_size, feature_size)
+        #    Output shape: (batch_size, feature_size + pad_size)
+        padded_x = F.pad(x, (0, self.pad_size))
+        
+        # 2. Reshape the padded tensor into a sequence of patches.
+        #    This is the core "patching" operation.
+        #    Output shape: (batch_size, num_patches, patch_size)
+        patches = padded_x.view(x.shape[0], self.num_patches, self.patch_size)
+        
+        # 3. Project each patch to the target embedding dimension.
+        #    The linear layer is applied to the last dimension (patch_size).
+        #    Output shape: (batch_size, num_patches, embed_dim)
+        projected_patches = self.projection(patches)
+        
+        return projected_patches
 
 class TransformerEncoderLayer(nn.Module):
     """

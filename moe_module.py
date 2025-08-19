@@ -341,6 +341,8 @@ class AddtionalNoisyGate(NoisyGate):
 
     def set_topk_logit(self, logit):
         """Stores the logits of the top-k experts."""
+        if self.topk_logits is None:
+            self.topk_logits = []
         self.topk_logits.append(logit)
     
     def get_topk_logit(self, clear = True):
@@ -367,6 +369,9 @@ class AddtionalNoisyGate(NoisyGate):
             self.loss = loss
         else:
             self.loss += loss
+
+    def clear_loss(self):
+        self.loss = None
     
     def set_full_modality(self, is_full_modality):
         """Sets a flag indicating if the current batch is for the G-Router."""
@@ -409,7 +414,7 @@ class AddtionalNoisyGate(NoisyGate):
 
         # This block contains the core logic for the S-Router (Specialized Router).
         # It is triggered only when `expert_indices` are provided for samples with missing modalities.
-        if (expert_indices != None) & (expert_indices.sum() > 0):
+        if expert_indices is not None and expert_indices.sum() > 0:
             batch_size = inp.shape[0]
             num_experts = expert_indices.shape[0]
             
@@ -428,9 +433,8 @@ class AddtionalNoisyGate(NoisyGate):
             # A mask to distinguish between G-Router samples (index 0) and S-Router samples.
             full_modality_mask_expanded = expert_indices_expanded == 0
 
-        # Calculate the cross-entropy loss for the S-Router. This trains the gate
-        # to route incomplete samples to their designated experts.
-        if expert_indices.sum() > 0:
+            # Calculate the cross-entropy loss for the S-Router. This trains the gate
+            # to route incomplete samples to their designated experts.
             expert_idx_loss = F.cross_entropy(logits[~full_modality_mask_expanded], expert_indices_expanded[~full_modality_mask_expanded])
             loss += expert_idx_loss
         
